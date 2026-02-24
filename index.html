@@ -10,7 +10,7 @@
   <header class="wrap header">
     <div>
       <h1>NFPC / NFTC 자동검토 대시보드</h1>
-      <p class="sub">NFPC/NFTC 목록 탐색 + 날짜별 자동검토 로그</p>
+      <p class="sub">법제처(행정규칙 OPEN API) 기반 · 전수 목록 클릭 탐색 · 날짜별 자동검토 로그</p>
     </div>
     <div class="meta">
       <span id="lastRun">마지막 자동검토: -</span>
@@ -18,22 +18,21 @@
   </header>
 
   <main class="wrap grid">
-    <!-- 좌측: 기준 목록 -->
     <section class="panel">
       <div class="panelHead">
         <h2>기준 목록</h2>
         <input id="searchStd" class="input" placeholder="검색: NFPC 103, 스프링클러, NFTC…" />
       </div>
-
       <div class="tabs">
         <button class="tab active" data-tab="nfpc">NFPC</button>
         <button class="tab" data-tab="nftc">NFTC</button>
       </div>
-
       <div id="stdList" class="list"></div>
+      <div class="small muted" style="margin-top:8px">
+        * 기준 목록은 standards_nfpc.json / standards_nftc.json에서 로드합니다.
+      </div>
     </section>
 
-    <!-- 우측: 검토 로그 -->
     <section class="panel">
       <div class="panelHead">
         <h2>검토 로그</h2>
@@ -46,12 +45,13 @@
           <button id="downloadJson" class="btn ghost">data.json 다운로드</button>
         </div>
       </div>
-
       <div id="logList" class="log"></div>
+      <div class="small muted" style="margin-top:8px">
+        * GitHub Actions가 data.json을 매일 자동 갱신합니다.
+      </div>
     </section>
   </main>
 
-  <!-- 상세 모달 -->
   <dialog id="dlg" class="dlg">
     <div class="dlgHead">
       <div>

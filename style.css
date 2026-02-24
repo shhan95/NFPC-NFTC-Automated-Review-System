@@ -37,7 +37,8 @@ h1{margin:0;font-size:20px}
 .logRow{border:1px solid var(--line);border-radius:12px;padding:10px}
 .logRowHead{display:flex;justify-content:space-between;gap:10px;align-items:center}
 .small{color:var(--muted);font-size:12px;margin-top:4px}
-.dlg{border:none;border-radius:14px;width:min(960px,92vw);background:var(--panel);color:var(--text)}
+.muted{color:var(--muted)}
+.dlg{border:none;border-radius:14px;width:min(980px,92vw);background:var(--panel);color:var(--text)}
 .dlg::backdrop{background:rgba(0,0,0,.55)}
 .dlgHead{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;padding:14px;border-bottom:1px solid var(--line)}
 .dlgTitle{font-weight:900}

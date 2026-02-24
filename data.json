@@ -1,44 +1,4 @@
 {
-  "records": [
-    {
-      "id": "2026-02-06",
-      "date": "2026-02-06",
-      "scope": "NFPC / NFTC (법제처·소방청)",
-      "result": "변경 없음",
-      "summary": "지난 금요일 대비 신규 발령·개정·등록 없음",
-      "refs": [
-        { "label": "법제처 국가법령정보센터(행정규칙)", "url": "https://www.law.go.kr/" },
-        { "label": "소방청 법령·고시", "url": "https://www.nfa.go.kr/" }
-      ]
-    },
-    {
-      "id": "2026-01-23",
-      "date": "2026-01-23",
-      "scope": "NFPC / NFTC (법제처·소방청)",
-      "result": "변경 있음",
-      "summary": "NFPC 301 일부개정(시행예정 2026-03-01) 확인",
-      "changes": [
-        {
-          "code": "NFPC 301",
-          "title": "피난기구의 화재안전성능기준",
-          "noticeNo": "소방청고시 제2025-27호",
-          "announceDate": "2025-12-24",
-          "effectiveDate": "2026-03-01",
-          "reason": "피난기구 설치·안전요건 정비(원문 제·개정이유 참조)",
-          "diff": [
-            { "article": "조문(예)", "before": "기존 기준", "after": "강화/정비된 기준" }
-          ],
-          "supplementary": "부칙 및 경과규정은 원문 확인",
-          "impact": [
-            "설계: 적용기준(시행일) 명시 및 수량/하중 요건 반영",
-            "시공: 제품 형식승인/성적서 및 설치 구조 확인",
-            "유지관리: 점검대장에 적용기준·이력 기록"
-          ],
-          "refs": [
-            { "label": "법제처 원문(NFPC 301)", "url": "https://www.law.go.kr/" }
-          ]
-        }
-      ]
-    }
-  ]
+  "lastRun": null,
+  "records": []
 }

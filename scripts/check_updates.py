@@ -1,10 +1,16 @@
-import json, re
+import os, json, hashlib, urllib.parse
 from datetime import datetime, timezone, timedelta
 import requests
-from bs4 import BeautifulSoup
 
 KST = timezone(timedelta(hours=9))
 TODAY = datetime.now(KST).strftime("%Y-%m-%d")
+
+LAWGO_OC = os.getenv("LAWGO_OC", "").strip()
+if not LAWGO_OC:
+    raise SystemExit("ENV LAWGO_OC is empty. Set GitHub Secret 'LAWGO_OC' to your 법제처 OPEN API OC value (email id).")
+
+LAW_SEARCH = "http://www.law.go.kr/DRF/lawSearch.do"
+LAW_SERVICE = "http://www.law.go.kr/DRF/lawService.do"
 
 def load(path, default):
     try:
@@ -17,45 +23,134 @@ def save(path, obj):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
 
-def fetch_meta(url: str) -> dict:
-    """
-    법제처/소방청 페이지는 형태가 다양함.
-    여기서는 가능한 범위에서 '발령일/시행일/고시번호/개정유형'처럼
-    메타를 문자열 패턴으로 최대한 뽑는 방식.
-    """
-    try:
-        r = requests.get(url, timeout=25, headers={"User-Agent":"Mozilla/5.0"})
-        r.raise_for_status()
-        html = r.text
-    except Exception as e:
-        return {"error": str(e)}
-
-    soup = BeautifulSoup(html, "lxml")
-    text = soup.get_text(" ", strip=True)
-
-    def pick(pats):
-        for p in pats:
-            m = re.search(p, text)
-            if m:
-                return m.group(1)
+def ymd_int_to_dot(v):
+    # 20250202 -> 2025.02.02
+    if v is None:
         return None
+    s = str(v).strip()
+    if not s.isdigit() or len(s) != 8:
+        return s
+    return f"{s[0:4]}.{s[4:6]}.{s[6:8]}"
 
-    notice = pick([r"(소방청고시\s*제[\d\-]+호)"])
-    announce = pick([r"발령일\s*[:：]?\s*(\d{4}\.\d{1,2}\.\d{1,2})",
-                     r"발령\s*[:：]?\s*(\d{4}\.\d{1,2}\.\d{1,2})"])
-    effective = pick([r"시행일\s*[:：]?\s*(\d{4}\.\d{1,2}\.\d{1,2})",
-                      r"시행\s*[:：]?\s*(\d{4}\.\d{1,2}\.\d{1,2})"])
-    revtype = pick([r"(일부개정|전부개정|제정|폐지|타법개정)"])
+def sha256_text(t: str) -> str:
+    return hashlib.sha256((t or "").encode("utf-8")).hexdigest()
 
-    meta = {
-        "noticeNo": notice,
+def lawgo_search(query: str, knd: int = 3, display: int = 20):
+    params = {
+        "OC": LAWGO_OC,
+        "target": "admrul",
+        "type": "JSON",
+        "query": query,
+        "knd": str(knd),
+        "display": str(display),
+        "sort": "ddes"  # 발령일자 내림차순
+    }
+    r = requests.get(LAW_SEARCH, params=params, timeout=30)
+    r.raise_for_status()
+    return r.json()
+
+def lawgo_detail(admrul_id: str):
+    params = {
+        "OC": LAWGO_OC,
+        "target": "admrul",
+        "type": "JSON",
+        "ID": str(admrul_id)
+    }
+    r = requests.get(LAW_SERVICE, params=params, timeout=30)
+    r.raise_for_status()
+    return r.json()
+
+def pick_best_item(items, org_name="소방청"):
+    # 우선: 소관부처명=소방청, 행정규칙종류=고시
+    # 그 다음: 제명이 가장 길게/정확히 일치하는 것(간단 점수)
+    best = None
+    best_score = -1
+    for it in items:
+        org = (it.get("소관부처명") or it.get("소관부처") or "")
+        kind = (it.get("행정규칙종류") or "")
+        score = 0
+        if org_name and org_name in org:
+            score += 100
+        if "고시" in kind:
+            score += 20
+        # 최신 발령일 가산
+        prml = it.get("발령일자")
+        if prml:
+            score += 1
+        if score > best_score:
+            best, best_score = it, score
+    return best
+
+def build_snapshot_entry(std_item, tab_key: str, prev_entry: dict):
+    # 1) 검색
+    search_json = lawgo_search(std_item.get("query") or std_item["title"], knd=int(std_item.get("knd",3)))
+    # 응답 구조: { "admrul": [ ... ] } 또는 { "admrul":[...] } 등 변동 가능
+    items = None
+    for k in ("admrul", "Admrul", "admruls"):
+        if k in search_json:
+            items = search_json[k]
+            break
+    if items is None:
+        # 일부 응답은 "법령" 같은 상위 키 밑에 있을 수 있음
+        items = search_json.get("행정규칙", None)
+
+    items = items or []
+    best = pick_best_item(items, org_name=std_item.get("orgName","소방청"))
+    if not best:
+        return {**prev_entry, "checkedAt": TODAY, "error": "검색 결과 없음"}
+
+    adm_id = best.get("행정규칙일련번호") or best.get("일련번호") or best.get("id") or best.get("ID")
+    if not adm_id:
+        return {**prev_entry, "checkedAt": TODAY, "error": "일련번호 추출 실패"}
+
+    # 2) 상세
+    det = lawgo_detail(adm_id)
+    # 상세 구조: {"행정규칙": {...}} 또는 {"admrul": {...}}
+    payload = det.get("행정규칙") or det.get("admrul") or det
+    notice_no = payload.get("발령번호") or payload.get("발령번호string") or payload.get("발령번호 ")
+    announce = ymd_int_to_dot(payload.get("발령일자"))
+    effective = payload.get("시행일자")
+    # 시행일자가 YYYYMMDD 형태면 변환
+    effective = ymd_int_to_dot(effective) if isinstance(effective, (int,str)) else effective
+    rev = payload.get("제개정구분명")
+    org = payload.get("소관부처명")
+    name = payload.get("행정규칙명") or std_item.get("title")
+    # 본문/부칙/별표 해시로 변경 감지 강화(원문 전문 저장은 피함)
+    body_hash = sha256_text(payload.get("조문내용") or "")
+    add_hash = sha256_text((payload.get("부칙내용") or "") + (payload.get("별표내용") or ""))
+
+    # 법제처 원문 링크: 목록 API에서 제공하는 상세링크가 있을 수 있음
+    html_url = best.get("행정규칙상세링크") or best.get("상세링크") or ""
+    # 없으면 law.go.kr에서 ID 기반 링크를 만들어두고(사용자 클릭용)
+    if not html_url:
+        # DRF 상세(JSON)이 아닌 웹 상세는 변동될 수 있어, 최소한 DRF HTML 링크 제공
+        html_url = f"{LAW_SERVICE}?OC={urllib.parse.quote(LAWGO_OC)}&target=admrul&ID={adm_id}&type=HTML"
+
+    return {
+        "code": std_item["code"],
+        "title": std_item.get("title"),
+        "checkedAt": TODAY,
+        "lawgoId": str(adm_id),
+        "noticeNo": notice_no,
         "announceDate": announce,
         "effectiveDate": effective,
-        "revisionType": revtype,
-        "checkedAt": TODAY,
-        "sourceUrl": url
+        "revisionType": rev,
+        "orgName": org,
+        "ruleName": name,
+        "htmlUrl": html_url,
+        "bodyHash": body_hash,
+        "suppHash": add_hash
     }
-    return meta
+
+def detect_change(prev: dict, cur: dict):
+    if not prev:
+        return False, []
+    keys = ["noticeNo","announceDate","effectiveDate","revisionType","bodyHash","suppHash"]
+    diffs=[]
+    for k in keys:
+        if (prev.get(k) or "") != (cur.get(k) or ""):
+            diffs.append(k)
+    return (len(diffs)>0), diffs
 
 def main():
     nfpc = load("standards_nfpc.json", {"items":[]})
@@ -65,74 +160,43 @@ def main():
 
     changes = []
 
-    # NFPC
-    for item in nfpc.get("items", []):
-        code, url = item.get("code"), item.get("url")
-        if not code or not url: 
-            continue
-        prev = snap["nfpc"].get(code, {})
-        cur = fetch_meta(url)
-        snap["nfpc"][code] = {**prev, **cur, "title": item.get("title"), "url": url}
-        # 변경 감지: 발령일/시행일/개정유형/고시번호 중 하나라도 바뀌면 변경으로 처리
-        keys = ["noticeNo","announceDate","effectiveDate","revisionType"]
-        if all(prev.get(k) == snap["nfpc"][code].get(k) for k in keys):
-            continue
-        if prev:  # 첫 수집은 변경으로 안 잡고 싶으면 prev 존재할 때만
-            changes.append({
-                "code": code,
-                "title": item.get("title"),
-                "noticeNo": snap["nfpc"][code].get("noticeNo"),
-                "announceDate": snap["nfpc"][code].get("announceDate"),
-                "effectiveDate": snap["nfpc"][code].get("effectiveDate"),
-                "reason": "자동 감지: 발령/시행/개정유형 등 메타 변경 확인(원문 제·개정이유 및 신구비교 확인 필요)",
-                "diff": [],
-                "supplementary": "부칙/경과규정은 원문 확인",
-                "impact": [
-                    "설계: 시행일 기준 적용(도서/시방서에 적용기준 명시)",
-                    "시공: 자재/설비 선정 시 개정기준 충족 여부 확인",
-                    "유지관리: 점검대장에 적용기준/이력 기록"
-                ],
-                "refs": [{"label":"원문", "url": url}]
-            })
+    for tab_key, std in (("nfpc", nfpc), ("nftc", nftc)):
+        for item in std.get("items", []):
+            code = item.get("code")
+            if not code:
+                continue
+            prev = (snap.get(tab_key, {}) or {}).get(code, {})
+            cur = build_snapshot_entry(item, tab_key, prev)
+            snap.setdefault(tab_key, {})[code] = cur
 
-    # NFTC
-    for item in nftc.get("items", []):
-        code, url = item.get("code"), item.get("url")
-        if not code or not url:
-            continue
-        prev = snap["nftc"].get(code, {})
-        cur = fetch_meta(url)
-        snap["nftc"][code] = {**prev, **cur, "title": item.get("title"), "url": url}
-        keys = ["noticeNo","announceDate","effectiveDate","revisionType"]
-        if all(prev.get(k) == snap["nftc"][code].get(k) for k in keys):
-            continue
-        if prev:
-            changes.append({
-                "code": code,
-                "title": item.get("title"),
-                "noticeNo": snap["nftc"][code].get("noticeNo"),
-                "announceDate": snap["nftc"][code].get("announceDate"),
-                "effectiveDate": snap["nftc"][code].get("effectiveDate"),
-                "reason": "자동 감지: 발령/시행/개정유형 등 메타 변경 확인(원문 제·개정이유 및 신구비교 확인 필요)",
-                "diff": [],
-                "supplementary": "부칙/경과규정은 원문 확인",
-                "impact": [
-                    "설계: 시행일 기준 적용(도서/시방서에 적용기준 명시)",
-                    "시공: 자재/설비 선정 시 개정기준 충족 여부 확인",
-                    "유지관리: 점검대장에 적용기준/이력 기록"
-                ],
-                "refs": [{"label":"원문", "url": url}]
-            })
+            changed, diff_keys = detect_change(prev, cur)
+            if changed:
+                changes.append({
+                    "code": code,
+                    "title": item.get("title"),
+                    "noticeNo": cur.get("noticeNo"),
+                    "announceDate": cur.get("announceDate"),
+                    "effectiveDate": cur.get("effectiveDate"),
+                    "reason": f"자동 감지: 메타/본문 해시 변경({', '.join(diff_keys)})",
+                    "diff": [],  # 조문·별표 신구대비는 별도 API 또는 수동 확인 영역
+                    "supplementary": "부칙/경과규정은 원문 확인",
+                    "impact": [
+                        "설계: 시행일 기준 적용(도서·시방서에 적용기준 명시)",
+                        "시공: 자재/설비 선정 시 개정기준 충족 여부 확인",
+                        "유지관리: 점검대장에 적용기준/이력 기록"
+                    ],
+                    "refs": [{"label":"법제처(원문/DRF)", "url": cur.get("htmlUrl","")}]
+                })
 
-    # 로그 기록
     data["lastRun"] = TODAY
+
     if changes:
         rec = {
             "id": TODAY,
             "date": TODAY,
-            "scope": "NFPC / NFTC (법제처·소방청)",
+            "scope": "NFPC / NFTC (법제처 OPEN API: 행정규칙)",
             "result": "변경 있음",
-            "summary": f"자동 감지: {len(changes)}건 메타 변경(원문 확인 권장)",
+            "summary": f"자동 감지: {len(changes)}건 변경(원문 확인 권장)",
             "changes": changes,
             "refs": []
         }
@@ -140,13 +204,13 @@ def main():
         rec = {
             "id": TODAY,
             "date": TODAY,
-            "scope": "NFPC / NFTC (법제처·소방청)",
+            "scope": "NFPC / NFTC (법제처 OPEN API: 행정규칙)",
             "result": "변경 없음",
-            "summary": "전일/전주 대비 신규 발령·개정 메타 변경 없음",
+            "summary": "전일 대비 변경 감지 없음",
             "refs": []
         }
 
-    # 중복 방지: 같은 날짜 기록 있으면 교체
+    # 같은 날짜 있으면 교체
     data["records"] = [r for r in data.get("records", []) if r.get("date") != TODAY]
     data["records"].insert(0, rec)
 
