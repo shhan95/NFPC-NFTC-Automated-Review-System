@@ -1,0 +1,37 @@
+name: NFPC NFTC Daily Check
+
+on:
+  schedule:
+    - cron: "0 22 * * *"   # KST 07:00 (UTC 22:00)
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  run-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4 lxml
+
+      - name: Run checker
+        run: |
+          python scripts/check_updates.py
+
+      - name: Commit & push
+        run: |
+          git config user.name "nfpc-nftc-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add data.json snapshot.json
+          git commit -m "Daily NFPC/NFTC check" || echo "No changes"
+          git push
