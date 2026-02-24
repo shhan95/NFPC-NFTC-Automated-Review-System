@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NFPC / NFTC 법령 자동검토 로그</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="container">
+    <h1>NFPC / NFTC 법령 자동검토 로그</h1>
+    <p class="sub">법제처 국가법령정보센터 · 소방청 고시 기준</p>
+
+    <table id="logTable">
+        <thead>
+            <tr>
+                <th>검토일자</th>
+                <th>검토 범위</th>
+                <th>결과</th>
+                <th>변경 법령</th>
+            </tr>
+        </thead>
+        <tbody>
+        </tbody>
+    </table>
+</div>
+
+<script>
+async function loadData() {
+    const response = await fetch('data.json');
+    const data = await response.json();
+    const tableBody = document.querySelector('#logTable tbody');
+
+    data.records.sort((a, b) => new Date(b.date) - new Date(a.date));
+
+    data.records.forEach(record => {
+        const row = document.createElement('tr');
+
+        const dateCell = document.createElement('td');
+        dateCell.textContent = record.date;
+
+        const scopeCell = document.createElement('td');
+        scopeCell.textContent = record.scope;
+
+        const resultCell = document.createElement('td');
+        resultCell.textContent = record.result;
+        resultCell.className = record.result === "변경 없음" ? "nochange" : "change";
+
+        const changeCell = document.createElement('td');
+        if (record.result === "변경 있음" && record.changes) {
+            changeCell.textContent = record.changes.map(c => c.code).join(", ");
+        } else {
+            changeCell.textContent = "-";
+        }
+
+        row.appendChild(dateCell);
+        row.appendChild(scopeCell);
+        row.appendChild(resultCell);
+        row.appendChild(changeCell);
+
+        tableBody.appendChild(row);
+    });
+}
+
+loadData();
+</script>
+
+</body>
+</html>
