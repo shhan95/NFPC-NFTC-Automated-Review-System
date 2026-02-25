@@ -44,6 +44,18 @@ jobs:
             echo "LAWGO_OC is SET (length=${#LAWGO_OC})"
             echo "LAWGO_OC(first3)=${LAWGO_OC:0:3}***"
           fi
+
+      - name: Export LAWGO_OC to environment
+        run: echo "LAWGO_OC=${{ secrets.LAWGO_OC }}" >> $GITHUB_ENV
+
+      - name: Assert LAWGO_OC is present
+        shell: bash
+        run: |
+          if [ -z "$LAWGO_OC" ]; then
+            echo "LAWGO_OC still empty"
+            exit 1
+          fi
+          echo "LAWGO_OC present (len=${#LAWGO_OC})"
           
       - name: Run checker
         run: |
