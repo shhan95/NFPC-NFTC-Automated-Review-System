@@ -46,8 +46,11 @@ def lawgo_search(query: str, knd: int = 3, display: int = 20):
         "sort": "ddes"
     }
     r = requests.get(LAW_SEARCH, params=params, timeout=30)
-    ct = (r.headers.get("Content-Type") or "").lower()
-    head = (r.text or "")[:200].replace("\n", " ")
+    print("DEBUG_STATUS", r.status_code)
+    print("DEBUG_CT", r.headers.get("Content-Type"))
+    print("DEBUG_HEAD", (r.text or "")[:200].replace("\n", " "))
+    r.raise_for_status()
+    return r.json()
 
     # 상태/형식이 이상하면 즉시 종료(원인 출력)
     if r.status_code != 200:
