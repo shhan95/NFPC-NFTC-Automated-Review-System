@@ -45,11 +45,18 @@ def lawgo_search(query: str, knd: int = 3, display: int = 20):
         "display": str(display),
         "sort": "ddes"
     }
+
     r = requests.get(LAW_SEARCH, params=params, timeout=30)
+
+    # ✅ 원인 확인용 출력 (값 노출 없음)
     print("DEBUG_STATUS", r.status_code)
     print("DEBUG_CT", r.headers.get("Content-Type"))
     print("DEBUG_HEAD", (r.text or "")[:200].replace("\n", " "))
+
+    # 상태코드가 200이 아니면 여기서 바로 실패(원인 파악 가능)
     r.raise_for_status()
+
+    # JSON 파싱
     return r.json()
 
     # 상태/형식이 이상하면 즉시 종료(원인 출력)
