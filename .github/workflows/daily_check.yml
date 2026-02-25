@@ -39,6 +39,14 @@ jobs:
           fi
           echo "LAWGO_OC is present (len=${#LAWGO_OC})"
 
+      - name: Debug context (no reveal)
+        run: |
+          echo "workflow=${{ github.workflow }}"
+          echo "workflow_ref=${{ github.workflow_ref }}"
+          echo "repo=${{ github.repository }}"
+          echo "ref=${{ github.ref }}"
+          echo "secret_empty=${{ secrets.LAWGO_OC == '' }}"
+
       - name: Run checker
         env:
           LAWGO_OC: ${{ secrets.LAWGO_OC }}
