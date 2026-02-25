@@ -11,6 +11,8 @@ permissions:
 jobs:
   run-check:
     runs-on: ubuntu-latest
+    env:
+      LAWGO_OC: ${{ secrets.LAWGO_OC }}
     steps:
       - uses: actions/checkout@v4
 
