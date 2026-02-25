@@ -1,6 +1,7 @@
 import os, json, hashlib, urllib.parse
 from datetime import datetime, timezone, timedelta
 import requests
+print("### CHECK_UPDATES VERSION: 2026-02-25 13:55 KST ###")
 
 KST = timezone(timedelta(hours=9))
 TODAY = datetime.now(KST).strftime("%Y-%m-%d")
