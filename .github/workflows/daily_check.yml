@@ -40,6 +40,8 @@ jobs:
           echo "LAWGO_OC is present (len=${#LAWGO_OC})"
 
       - name: Run checker
+        env:
+          LAWGO_OC: ${{ secrets.LAWGO_OC }}
         run: |
           python scripts/check_updates.py
 
