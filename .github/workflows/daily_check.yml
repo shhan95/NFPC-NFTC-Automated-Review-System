@@ -11,8 +11,6 @@ permissions:
 jobs:
   run-check:
     runs-on: ubuntu-latest
-    env:
-      LAWGO_OC: ${{ secrets.LAWGO_OC }}
     steps:
       - uses: actions/checkout@v4
 
@@ -25,38 +23,22 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4 lxml
-          
-      - name: Debug secrets context (no reveal)
+
+      # ✅ 핵심: secrets → GITHUB_ENV로 강제 주입
+      - name: Export OC to env
         run: |
-          echo "secrets.LAWGO_OC empty? => ${{ secrets.LAWGO_OC == '' }}"
-          echo "repo => ${{ github.repository }}"
-          echo "ref  => ${{ github.ref }}"
-          
-      - name: Debug env (LAWGO_OC)
+          echo "LAWGO_OC=${{ secrets.LAWGO_OC }}" >> $GITHUB_ENV
+
+      # ✅ 값 노출 없이 존재만 확인
+      - name: Assert OC exists
         shell: bash
         run: |
           if [ -z "$LAWGO_OC" ]; then
-            echo "LAWGO_OC is EMPTY"
-            echo "Available secrets env keys (filtered):"
-            env | sort | grep -E 'LAWGO|OC|SECRET' || true
-            exit 1
-          else
-            echo "LAWGO_OC is SET (length=${#LAWGO_OC})"
-            echo "LAWGO_OC(first3)=${LAWGO_OC:0:3}***"
-          fi
-
-      - name: Export LAWGO_OC to environment
-        run: echo "LAWGO_OC=${{ secrets.LAWGO_OC }}" >> $GITHUB_ENV
-
-      - name: Assert LAWGO_OC is present
-        shell: bash
-        run: |
-          if [ -z "$LAWGO_OC" ]; then
-            echo "LAWGO_OC still empty"
+            echo "LAWGO_OC is EMPTY (secrets not injected)"
             exit 1
           fi
-          echo "LAWGO_OC present (len=${#LAWGO_OC})"
-          
+          echo "LAWGO_OC is present (len=${#LAWGO_OC})"
+
       - name: Run checker
         run: |
           python scripts/check_updates.py
