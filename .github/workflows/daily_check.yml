@@ -2,15 +2,23 @@ name: NFPC NFTC Daily Check
 
 on:
   schedule:
-    - cron: "0 22 * * *"   # KST 07:00 (UTC 22:00)
+    - cron: "0 22 * * *" # KST 07:00 (UTC 22:00)
   workflow_dispatch:
 
 permissions:
   contents: write
 
+concurrency:
+  group: nfpc-nftc-daily
+  cancel-in-progress: false
+
 jobs:
   run-check:
     runs-on: ubuntu-latest
+    env:
+      LAWGO_OC: ${{ secrets.LAWGO_OC }}
+      TZ: Asia/Seoul
+
     steps:
       - uses: actions/checkout@v4
 
@@ -22,49 +30,32 @@ jobs:
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install requests beautifulsoup4 lxml
+          pip install requests
 
-      - name: Debug context (no reveal)
-        run: |
-          echo "workflow=${{ github.workflow }}"
-          echo "workflow_ref=${{ github.workflow_ref }}"
-          echo "repo=${{ github.repository }}"
-          echo "ref=${{ github.ref }}"
-          echo "secret_empty=${{ secrets.LAWGO_OC == '' }}"
-
-      # ✅ 핵심: secrets → GITHUB_ENV로 강제 주입
-      - name: Export OC to env
-        run: |
-          echo "LAWGO_OC=${{ secrets.LAWGO_OC }}" >> $GITHUB_ENV
-
-      # ✅ 값 노출 없이 존재만 확인
-      - name: Assert OC exists
+      - name: Sanity check secret (no reveal)
         shell: bash
         run: |
           if [ -z "$LAWGO_OC" ]; then
-            echo "LAWGO_OC is EMPTY (secrets not injected)"
+            echo "ERROR: LAWGO_OC secret is empty. Add repository secret: LAWGO_OC"
             exit 1
           fi
-          echo "LAWGO_OC is present (len=${#LAWGO_OC})"
-
-      - name: Debug context (no reveal)
-        run: |
-          echo "workflow=${{ github.workflow }}"
-          echo "workflow_ref=${{ github.workflow_ref }}"
-          echo "repo=${{ github.repository }}"
-          echo "ref=${{ github.ref }}"
-          echo "secret_empty=${{ secrets.LAWGO_OC == '' }}"
+          echo "LAWGO_OC is set (length=${#LAWGO_OC})"
 
       - name: Run checker
-        env:
-          LAWGO_OC: ${{ secrets.LAWGO_OC }}
         run: |
           python scripts/check_updates.py
 
-      - name: Commit & push
+      - name: Commit & push (only if changed)
+        shell: bash
         run: |
           git config user.name "nfpc-nftc-bot"
           git config user.email "bot@users.noreply.github.com"
-          git add data.json snapshot.json
-          git commit -m "Daily NFPC/NFTC check" || echo "No changes"
-          git push
+
+          # 변경 여부 확인 (data.json/snapshot.json만)
+          if git status --porcelain | grep -E 'data\.json|snapshot\.json' >/dev/null 2>&1; then
+            git add data.json snapshot.json
+            git commit -m "Daily NFPC/NFTC check" || true
+            git push
+          else
+            echo "No changes to commit."
+          fi
