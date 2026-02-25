@@ -142,6 +142,9 @@ def lawgo_search(query: str, knd: int = 3, display: int = 20) -> Tuple[Optional[
         "display": str(display),
         "sort": "ddes",
     }
+print("STATUS", r.status_code)
+print("CT", r.headers.get("Content-Type"))
+print("HEAD", (r.text or "")[:200].replace("\n", " "))
     return _request_json(LAW_SEARCH, params)
 
 def lawgo_detail(admrul_id: str) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
