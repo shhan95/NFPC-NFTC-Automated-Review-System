@@ -9,8 +9,8 @@ LAWGO_OC = os.getenv("LAWGO_OC", "").strip()
 if not LAWGO_OC:
     raise SystemExit("ENV LAWGO_OC is empty. Set GitHub Secret 'LAWGO_OC' to your 법제처 OPEN API OC value (email id).")
 
-LAW_SEARCH = "http://www.law.go.kr/DRF/lawSearch.do"
-LAW_SERVICE = "http://www.law.go.kr/DRF/lawService.do"
+LAW_SEARCH = "https://www.law.go.kr/DRF/lawSearch.do"
+LAW_SERVICE = "https://www.law.go.kr/DRF/lawService.do"
 
 def load(path, default):
     try:
