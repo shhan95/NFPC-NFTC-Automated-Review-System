@@ -24,6 +24,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4 lxml
 
+      - name: Debug context (no reveal)
+        run: |
+          echo "workflow=${{ github.workflow }}"
+          echo "workflow_ref=${{ github.workflow_ref }}"
+          echo "repo=${{ github.repository }}"
+          echo "ref=${{ github.ref }}"
+          echo "secret_empty=${{ secrets.LAWGO_OC == '' }}"
+
       # ✅ 핵심: secrets → GITHUB_ENV로 강제 주입
       - name: Export OC to env
         run: |
