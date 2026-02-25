@@ -43,11 +43,24 @@ def lawgo_search(query: str, knd: int = 3, display: int = 20):
         "query": query,
         "knd": str(knd),
         "display": str(display),
-        "sort": "ddes"  # 발령일자 내림차순
+        "sort": "ddes"
     }
     r = requests.get(LAW_SEARCH, params=params, timeout=30)
-    r.raise_for_status()
-    return r.json()
+    ct = (r.headers.get("Content-Type") or "").lower()
+    head = (r.text or "")[:200].replace("\n", " ")
+
+    # 상태/형식이 이상하면 즉시 종료(원인 출력)
+    if r.status_code != 200:
+        raise SystemExit(f"[LAW_SEARCH] HTTP {r.status_code} CT={ct} HEAD={head!r}")
+    if "json" not in ct:
+        raise SystemExit(f"[LAW_SEARCH] NOT_JSON CT={ct} HEAD={head!r}")
+    if not (r.text or "").strip():
+        raise SystemExit("[LAW_SEARCH] EMPTY_BODY")
+
+    try:
+        return r.json()
+    except Exception as e:
+        raise SystemExit(f"[LAW_SEARCH] JSON_PARSE_FAIL CT={ct} HEAD={head!r} ERR={e}")
 
 def lawgo_detail(admrul_id: str):
     params = {
