@@ -26,6 +26,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4 lxml
           
+      - name: Debug secrets context (no reveal)
+        run: |
+          echo "secrets.LAWGO_OC empty? => ${{ secrets.LAWGO_OC == '' }}"
+          echo "repo => ${{ github.repository }}"
+          echo "ref  => ${{ github.ref }}"
+          
       - name: Debug env (LAWGO_OC)
         shell: bash
         run: |
