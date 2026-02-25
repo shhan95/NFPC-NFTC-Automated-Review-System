@@ -1,8 +1,13 @@
-import os, json, hashlib, urllib.parse
+import os, json, hashlib, urllib.parse, time, random
 from datetime import datetime, timezone, timedelta
-import requests
-print("### CHECK_UPDATES VERSION: 2026-02-25 13:55 KST ###")
+from typing import Any, Dict, Tuple, Optional
 
+import requests
+
+
+# =====================
+# Config
+# =====================
 KST = timezone(timedelta(hours=9))
 TODAY = datetime.now(KST).strftime("%Y-%m-%d")
 
@@ -10,22 +15,29 @@ LAWGO_OC = os.getenv("LAWGO_OC", "").strip()
 if not LAWGO_OC:
     raise SystemExit("ENV LAWGO_OC is empty. Set GitHub Secret 'LAWGO_OC' to your 법제처 OPEN API OC value (email id).")
 
+# ✅ https 고정
 LAW_SEARCH = "https://www.law.go.kr/DRF/lawSearch.do"
 LAW_SERVICE = "https://www.law.go.kr/DRF/lawService.do"
 
-def load(path, default):
+TIMEOUT = 30
+MAX_RETRIES = 4
+
+
+# =====================
+# Helpers (file I/O)
+# =====================
+def load(path: str, default: Any) -> Any:
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     except FileNotFoundError:
         return default
 
-def save(path, obj):
+def save(path: str, obj: Any) -> None:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
 
-def ymd_int_to_dot(v):
-    # 20250202 -> 2025.02.02
+def ymd_int_to_dot(v: Any) -> Any:
     if v is None:
         return None
     s = str(v).strip()
@@ -36,7 +48,91 @@ def ymd_int_to_dot(v):
 def sha256_text(t: str) -> str:
     return hashlib.sha256((t or "").encode("utf-8")).hexdigest()
 
-def lawgo_search(query: str, knd: int = 3, display: int = 20):
+
+# =====================
+# HTTP (robust)
+# =====================
+def _request_json(url: str, params: Dict[str, str]) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """
+    Returns: (json_payload, error_info)
+      - json_payload: parsed dict if success
+      - error_info: dict with debug fields if failed (no secret exposure)
+    """
+    session = requests.Session()
+    last_err = None
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            r = session.get(url, params=params, timeout=TIMEOUT, allow_redirects=True)
+            ct = (r.headers.get("Content-Type") or "").lower()
+            text = r.text or ""
+            head = text[:200].replace("\n", " ")
+
+            # status not ok
+            if r.status_code != 200:
+                last_err = {
+                    "kind": "http_error",
+                    "status": r.status_code,
+                    "contentType": ct,
+                    "head": head,
+                    "url": url,
+                }
+                # 429/5xx는 재시도 가치 큼
+                if r.status_code in (429, 500, 502, 503, 504):
+                    _backoff(attempt)
+                    continue
+                return None, last_err
+
+            # content type not json (HTML/empty/blocked)
+            if "json" not in ct:
+                # 빈 응답도 여기로 들어옴
+                last_err = {
+                    "kind": "not_json",
+                    "status": r.status_code,
+                    "contentType": ct,
+                    "head": head,
+                    "url": url,
+                }
+                # 일시 오류 가능 → 재시도
+                _backoff(attempt)
+                continue
+
+            # try parse json
+            try:
+                return r.json(), None
+            except Exception as e:
+                last_err = {
+                    "kind": "json_parse_fail",
+                    "status": r.status_code,
+                    "contentType": ct,
+                    "head": head,
+                    "url": url,
+                    "error": str(e),
+                }
+                _backoff(attempt)
+                continue
+
+        except requests.RequestException as e:
+            last_err = {
+                "kind": "request_exception",
+                "url": url,
+                "error": str(e),
+            }
+            _backoff(attempt)
+            continue
+
+    return None, last_err
+
+def _backoff(attempt: int) -> None:
+    # 0.6s, 1.2s, 2.4s... + jitter
+    base = 0.6 * (2 ** (attempt - 1))
+    time.sleep(base + random.random() * 0.4)
+
+
+# =====================
+# Law.go API wrappers
+# =====================
+def lawgo_search(query: str, knd: int = 3, display: int = 20) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     params = {
         "OC": LAWGO_OC,
         "target": "admrul",
@@ -44,52 +140,27 @@ def lawgo_search(query: str, knd: int = 3, display: int = 20):
         "query": query,
         "knd": str(knd),
         "display": str(display),
-        "sort": "ddes"
+        "sort": "ddes",
     }
+    return _request_json(LAW_SEARCH, params)
 
-    r = requests.get(LAW_SEARCH, params=params, timeout=30)
-
-    # ✅ 원인 확인용 출력 (값 노출 없음)
-    print("DEBUG_STATUS", r.status_code)
-    print("DEBUG_CT", r.headers.get("Content-Type"))
-    print("DEBUG_HEAD", (r.text or "")[:200].replace("\n", " "))
-
-    # 상태코드가 200이 아니면 여기서 바로 실패(원인 파악 가능)
-    r.raise_for_status()
-
-    # JSON 파싱
-    return r.json()
-
-    # 상태/형식이 이상하면 즉시 종료(원인 출력)
-    if r.status_code != 200:
-        raise SystemExit(f"[LAW_SEARCH] HTTP {r.status_code} CT={ct} HEAD={head!r}")
-    if "json" not in ct:
-        raise SystemExit(f"[LAW_SEARCH] NOT_JSON CT={ct} HEAD={head!r}")
-    if not (r.text or "").strip():
-        raise SystemExit("[LAW_SEARCH] EMPTY_BODY")
-
-    try:
-        return r.json()
-    except Exception as e:
-        raise SystemExit(f"[LAW_SEARCH] JSON_PARSE_FAIL CT={ct} HEAD={head!r} ERR={e}")
-
-def lawgo_detail(admrul_id: str):
+def lawgo_detail(admrul_id: str) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     params = {
         "OC": LAWGO_OC,
         "target": "admrul",
         "type": "JSON",
-        "ID": str(admrul_id)
+        "ID": str(admrul_id),
     }
-    r = requests.get(LAW_SERVICE, params=params, timeout=30)
-    r.raise_for_status()
-    return r.json()
+    return _request_json(LAW_SERVICE, params)
 
+
+# =====================
+# Picking / parsing
+# =====================
 def pick_best_item(items, org_name="소방청"):
-    # 우선: 소관부처명=소방청, 행정규칙종류=고시
-    # 그 다음: 제명이 가장 길게/정확히 일치하는 것(간단 점수)
     best = None
     best_score = -1
-    for it in items:
+    for it in items or []:
         org = (it.get("소관부처명") or it.get("소관부처") or "")
         kind = (it.get("행정규칙종류") or "")
         score = 0
@@ -97,61 +168,103 @@ def pick_best_item(items, org_name="소방청"):
             score += 100
         if "고시" in kind:
             score += 20
-        # 최신 발령일 가산
-        prml = it.get("발령일자")
-        if prml:
+        if it.get("발령일자"):
             score += 1
         if score > best_score:
             best, best_score = it, score
     return best
 
-def build_snapshot_entry(std_item, tab_key: str, prev_entry: dict):
-    # 1) 검색
-    search_json = lawgo_search(std_item.get("query") or std_item["title"], knd=int(std_item.get("knd",3)))
-    # 응답 구조: { "admrul": [ ... ] } 또는 { "admrul":[...] } 등 변동 가능
-    items = None
+def _extract_items(search_json: Dict[str, Any]) -> list:
     for k in ("admrul", "Admrul", "admruls"):
         if k in search_json:
-            items = search_json[k]
-            break
-    if items is None:
-        # 일부 응답은 "법령" 같은 상위 키 밑에 있을 수 있음
-        items = search_json.get("행정규칙", None)
+            return search_json.get(k) or []
+    if "행정규칙" in search_json and isinstance(search_json["행정규칙"], list):
+        return search_json["행정규칙"]
+    return []
 
-    items = items or []
-    best = pick_best_item(items, org_name=std_item.get("orgName","소방청"))
+def _extract_payload(detail_json: Dict[str, Any]) -> Dict[str, Any]:
+    # 상세 구조 다양성 대응
+    if isinstance(detail_json.get("행정규칙"), dict):
+        return detail_json["행정규칙"]
+    if isinstance(detail_json.get("admrul"), dict):
+        return detail_json["admrul"]
+    return detail_json
+
+
+# =====================
+# Snapshot builder
+# =====================
+def build_snapshot_entry(std_item: Dict[str, Any], tab_key: str, prev_entry: Dict[str, Any]) -> Dict[str, Any]:
+    query = std_item.get("query") or std_item.get("title") or std_item.get("code")
+    knd = int(std_item.get("knd", 3))
+    org_name = std_item.get("orgName", "소방청")
+
+    # 1) search
+    sj, err = lawgo_search(query, knd=knd)
+    if err:
+        return {
+            **(prev_entry or {}),
+            "code": std_item.get("code"),
+            "title": std_item.get("title"),
+            "checkedAt": TODAY,
+            "error": {
+                "where": "search",
+                **err,
+                "query": query,
+            },
+        }
+
+    items = _extract_items(sj or {})
+    best = pick_best_item(items, org_name=org_name)
     if not best:
-        return {**prev_entry, "checkedAt": TODAY, "error": "검색 결과 없음"}
+        return {
+            **(prev_entry or {}),
+            "code": std_item.get("code"),
+            "title": std_item.get("title"),
+            "checkedAt": TODAY,
+            "error": {"where": "search", "kind": "no_results", "query": query},
+        }
 
     adm_id = best.get("행정규칙일련번호") or best.get("일련번호") or best.get("id") or best.get("ID")
     if not adm_id:
-        return {**prev_entry, "checkedAt": TODAY, "error": "일련번호 추출 실패"}
+        return {
+            **(prev_entry or {}),
+            "code": std_item.get("code"),
+            "title": std_item.get("title"),
+            "checkedAt": TODAY,
+            "error": {"where": "search", "kind": "id_missing", "query": query},
+        }
 
-    # 2) 상세
-    det = lawgo_detail(adm_id)
-    # 상세 구조: {"행정규칙": {...}} 또는 {"admrul": {...}}
-    payload = det.get("행정규칙") or det.get("admrul") or det
-    notice_no = payload.get("발령번호") or payload.get("발령번호string") or payload.get("발령번호 ")
+    # 2) detail
+    dj, derr = lawgo_detail(str(adm_id))
+    if derr:
+        return {
+            **(prev_entry or {}),
+            "code": std_item.get("code"),
+            "title": std_item.get("title"),
+            "checkedAt": TODAY,
+            "lawgoId": str(adm_id),
+            "error": {"where": "detail", **derr},
+        }
+
+    payload = _extract_payload(dj or {})
+
+    notice_no = payload.get("발령번호")
     announce = ymd_int_to_dot(payload.get("발령일자"))
-    effective = payload.get("시행일자")
-    # 시행일자가 YYYYMMDD 형태면 변환
-    effective = ymd_int_to_dot(effective) if isinstance(effective, (int,str)) else effective
+    effective = ymd_int_to_dot(payload.get("시행일자"))
     rev = payload.get("제개정구분명")
     org = payload.get("소관부처명")
     name = payload.get("행정규칙명") or std_item.get("title")
-    # 본문/부칙/별표 해시로 변경 감지 강화(원문 전문 저장은 피함)
+
     body_hash = sha256_text(payload.get("조문내용") or "")
     add_hash = sha256_text((payload.get("부칙내용") or "") + (payload.get("별표내용") or ""))
 
-    # 법제처 원문 링크: 목록 API에서 제공하는 상세링크가 있을 수 있음
     html_url = best.get("행정규칙상세링크") or best.get("상세링크") or ""
-    # 없으면 law.go.kr에서 ID 기반 링크를 만들어두고(사용자 클릭용)
     if not html_url:
-        # DRF 상세(JSON)이 아닌 웹 상세는 변동될 수 있어, 최소한 DRF HTML 링크 제공
         html_url = f"{LAW_SERVICE}?OC={urllib.parse.quote(LAWGO_OC)}&target=admrul&ID={adm_id}&type=HTML"
 
     return {
-        "code": std_item["code"],
+        "code": std_item.get("code"),
         "title": std_item.get("title"),
         "checkedAt": TODAY,
         "lawgoId": str(adm_id),
@@ -163,38 +276,59 @@ def build_snapshot_entry(std_item, tab_key: str, prev_entry: dict):
         "ruleName": name,
         "htmlUrl": html_url,
         "bodyHash": body_hash,
-        "suppHash": add_hash
+        "suppHash": add_hash,
     }
 
-def detect_change(prev: dict, cur: dict):
+def detect_change(prev: Dict[str, Any], cur: Dict[str, Any]) -> Tuple[bool, list]:
     if not prev:
         return False, []
-    keys = ["noticeNo","announceDate","effectiveDate","revisionType","bodyHash","suppHash"]
-    diffs=[]
-    for k in keys:
-        if (prev.get(k) or "") != (cur.get(k) or ""):
-            diffs.append(k)
-    return (len(diffs)>0), diffs
+    if prev.get("error") or cur.get("error"):
+        # 에러 상태 변화도 기록 가치가 있음
+        if (prev.get("error") or "") != (cur.get("error") or ""):
+            return True, ["error"]
+        return False, []
+    keys = ["noticeNo", "announceDate", "effectiveDate", "revisionType", "bodyHash", "suppHash"]
+    diffs = [k for k in keys if (prev.get(k) or "") != (cur.get(k) or "")]
+    return (len(diffs) > 0), diffs
 
+
+# =====================
+# Main
+# =====================
 def main():
-    nfpc = load("standards_nfpc.json", {"items":[]})
-    nftc = load("standards_nftc.json", {"items":[]})
-    snap = load("snapshot.json", {"nfpc":{}, "nftc":{}})
+    nfpc = load("standards_nfpc.json", {"items": []})
+    nftc = load("standards_nftc.json", {"items": []})
+    snap = load("snapshot.json", {"nfpc": {}, "nftc": {}})
     data = load("data.json", {"lastRun": None, "records": []})
 
     changes = []
+    errors = []
 
     for tab_key, std in (("nfpc", nfpc), ("nftc", nftc)):
         for item in std.get("items", []):
             code = item.get("code")
             if not code:
                 continue
+
             prev = (snap.get(tab_key, {}) or {}).get(code, {})
             cur = build_snapshot_entry(item, tab_key, prev)
             snap.setdefault(tab_key, {})[code] = cur
 
+            # 에러 누적
+            if cur.get("error"):
+                errors.append({
+                    "code": code,
+                    "title": item.get("title"),
+                    "where": cur["error"].get("where"),
+                    "kind": cur["error"].get("kind"),
+                    "status": cur["error"].get("status"),
+                    "contentType": cur["error"].get("contentType"),
+                    "head": cur["error"].get("head"),
+                    "url": cur["error"].get("url"),
+                })
+
             changed, diff_keys = detect_change(prev, cur)
-            if changed:
+            if changed and not cur.get("error"):
                 changes.append({
                     "code": code,
                     "title": item.get("title"),
@@ -202,37 +336,36 @@ def main():
                     "announceDate": cur.get("announceDate"),
                     "effectiveDate": cur.get("effectiveDate"),
                     "reason": f"자동 감지: 메타/본문 해시 변경({', '.join(diff_keys)})",
-                    "diff": [],  # 조문·별표 신구대비는 별도 API 또는 수동 확인 영역
+                    "diff": [],
                     "supplementary": "부칙/경과규정은 원문 확인",
                     "impact": [
                         "설계: 시행일 기준 적용(도서·시방서에 적용기준 명시)",
                         "시공: 자재/설비 선정 시 개정기준 충족 여부 확인",
-                        "유지관리: 점검대장에 적용기준/이력 기록"
+                        "유지관리: 점검대장에 적용기준/이력 기록",
                     ],
-                    "refs": [{"label":"법제처(원문/DRF)", "url": cur.get("htmlUrl","")}]
+                    "refs": [{"label": "법제처(원문/DRF)", "url": cur.get("htmlUrl", "")}],
                 })
 
     data["lastRun"] = TODAY
 
     if changes:
-        rec = {
-            "id": TODAY,
-            "date": TODAY,
-            "scope": "NFPC / NFTC (법제처 OPEN API: 행정규칙)",
-            "result": "변경 있음",
-            "summary": f"자동 감지: {len(changes)}건 변경(원문 확인 권장)",
-            "changes": changes,
-            "refs": []
-        }
+        result = "변경 있음"
+        summary = f"자동 감지: {len(changes)}건 변경(원문 확인 권장)"
     else:
-        rec = {
-            "id": TODAY,
-            "date": TODAY,
-            "scope": "NFPC / NFTC (법제처 OPEN API: 행정규칙)",
-            "result": "변경 없음",
-            "summary": "전일 대비 변경 감지 없음",
-            "refs": []
-        }
+        result = "변경 없음"
+        summary = "전일 대비 변경 감지 없음"
+
+    # 에러가 있어도 워크플로는 “성공”으로 두고, 기록만 남김
+    rec = {
+        "id": TODAY,
+        "date": TODAY,
+        "scope": "NFPC / NFTC (법제처 OPEN API: 행정규칙)",
+        "result": result,
+        "summary": summary,
+        "changes": changes,
+        "errors": errors,
+        "refs": [],
+    }
 
     # 같은 날짜 있으면 교체
     data["records"] = [r for r in data.get("records", []) if r.get("date") != TODAY]
@@ -240,6 +373,9 @@ def main():
 
     save("snapshot.json", snap)
     save("data.json", data)
+
+    # 에러가 많아도 exit 0 (운영 지속)
+    print(f"Done. changes={len(changes)} errors={len(errors)} date={TODAY}")
 
 if __name__ == "__main__":
     main()
