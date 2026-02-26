@@ -154,7 +154,7 @@ def lawgo_detail(admrul_id: str) -> Tuple[Optional[Dict[str, Any]], Optional[Dic
         "type": "JSON",
         "ID": str(admrul_id),
     }
-    return _request_json(LAW_SERVICE, params)
+        return _request_json(LAW_SERVICE, params)
 
 
 # =====================
