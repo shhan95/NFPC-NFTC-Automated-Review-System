@@ -1,22 +1,24 @@
  (cd "$(git rev-parse --show-toplevel)" && git apply --3way <<'EOF' 
 diff --git a/scripts/check_updates.py b/scripts/check_updates.py
-index fb65a9fffd4fd32ecc71990e346d47a4885b6360..f7905e1ef0898d5d21580c8b3c2bce68608d5270 100644
+index fb65a9fffd4fd32ecc71990e346d47a4885b6360..dfd97f81ffe3c5f894adab9c61617bc3c4e7d5c3 100644
 --- a/scripts/check_updates.py
 +++ b/scripts/check_updates.py
-@@ -1,384 +1,440 @@
+@@ -1,384 +1,461 @@
 -import os, json, hashlib, urllib.parse, time, random
 -from datetime import datetime, timezone, timedelta
 -from typing import Any, Dict, Tuple, Optional
+-
+-import requests
 +import hashlib
 +import json
 +import os
 +import random
 +import time
 +import urllib.parse
++import urllib.request
++import urllib.error
 +from datetime import datetime, timedelta, timezone
 +from typing import Any, Dict, List, Optional, Tuple
- 
- import requests
  
  
  # =====================
@@ -72,18 +74,13 @@ index fb65a9fffd4fd32ecc71990e346d47a4885b6360..f7905e1ef0898d5d21580c8b3c2bce68
  # =====================
  # HTTP (robust)
  # =====================
--def _request_json(url: str, params: Dict[str, str]) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
 +def _backoff(attempt: int) -> None:
 +    # 0.6s, 1.2s, 2.4s... + jitter
 +    base = 0.6 * (2 ** (attempt - 1))
 +    time.sleep(base + random.random() * 0.4)
 +
 +
-+def _request_json(
-+    url: str,
-+    params: Dict[str, str],
-+    session: requests.Session,
-+) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+ def _request_json(url: str, params: Dict[str, str]) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
      """
      Returns: (json_payload, error_info)
        - json_payload: parsed dict if success
@@ -92,32 +89,42 @@ index fb65a9fffd4fd32ecc71990e346d47a4885b6360..f7905e1ef0898d5d21580c8b3c2bce68
 -    session = requests.Session()
 -    last_err = None
 +    last_err: Optional[Dict[str, Any]] = None
++    headers = {
++        "Accept": "application/json,*/*;q=0.8",
++        "User-Agent": "NFPC-NFTC-Automated-Review-System/1.0",
++    }
  
      for attempt in range(1, MAX_RETRIES + 1):
++        query = urllib.parse.urlencode(params, doseq=False, safe="")
++        req = urllib.request.Request(f"{url}?{query}", headers=headers, method="GET")
++
          try:
 -            r = session.get(url, params=params, timeout=TIMEOUT, allow_redirects=True)
 -            ct = (r.headers.get("Content-Type") or "").lower()
 -            text = r.text or ""
-+            response = session.get(url, params=params, timeout=TIMEOUT, allow_redirects=True)
-+            content_type = (response.headers.get("Content-Type") or "").lower()
-+            text = response.text or ""
++            with urllib.request.urlopen(req, timeout=TIMEOUT) as response:
++                status = getattr(response, "status", response.getcode())
++                content_type = (response.headers.get("Content-Type") or "").lower()
++                raw = response.read()
++
++            text = raw.decode("utf-8", errors="replace")
              head = text[:200].replace("\n", " ")
  
 -            # status not ok
 -            if r.status_code != 200:
-+            if response.status_code != 200:
++            if status != 200:
                  last_err = {
                      "kind": "http_error",
 -                    "status": r.status_code,
 -                    "contentType": ct,
-+                    "status": response.status_code,
++                    "status": status,
 +                    "contentType": content_type,
                      "head": head,
                      "url": url,
                  }
 -                # 429/5xx는 재시도 가치 큼
 -                if r.status_code in (429, 500, 502, 503, 504):
-+                if response.status_code in (429, 500, 502, 503, 504):
++                if status in (429, 500, 502, 503, 504):
                      _backoff(attempt)
                      continue
                  return None, last_err
@@ -130,7 +137,7 @@ index fb65a9fffd4fd32ecc71990e346d47a4885b6360..f7905e1ef0898d5d21580c8b3c2bce68
                      "kind": "not_json",
 -                    "status": r.status_code,
 -                    "contentType": ct,
-+                    "status": response.status_code,
++                    "status": status,
 +                    "contentType": content_type,
                      "head": head,
                      "url": url,
@@ -143,13 +150,13 @@ index fb65a9fffd4fd32ecc71990e346d47a4885b6360..f7905e1ef0898d5d21580c8b3c2bce68
              try:
 -                return r.json(), None
 -            except Exception as e:
-+                payload = response.json()
++                payload = json.loads(text)
 +            except Exception as e:  # noqa: BLE001
                  last_err = {
                      "kind": "json_parse_fail",
 -                    "status": r.status_code,
 -                    "contentType": ct,
-+                    "status": response.status_code,
++                    "status": status,
 +                    "contentType": content_type,
                      "head": head,
                      "url": url,
@@ -158,10 +165,11 @@ index fb65a9fffd4fd32ecc71990e346d47a4885b6360..f7905e1ef0898d5d21580c8b3c2bce68
                  _backoff(attempt)
                  continue
  
+-        except requests.RequestException as e:
 +            if not isinstance(payload, dict):
 +                last_err = {
 +                    "kind": "json_type_error",
-+                    "status": response.status_code,
++                    "status": status,
 +                    "contentType": content_type,
 +                    "head": head,
 +                    "url": url,
@@ -171,7 +179,26 @@ index fb65a9fffd4fd32ecc71990e346d47a4885b6360..f7905e1ef0898d5d21580c8b3c2bce68
 +
 +            return payload, None
 +
-         except requests.RequestException as e:
++        except urllib.error.HTTPError as e:
++            status = e.code
++            body = ""
++            try:
++                body = e.read().decode("utf-8", errors="replace")
++            except Exception:
++                body = ""
++            last_err = {
++                "kind": "http_error",
++                "status": status,
++                "contentType": (e.headers.get("Content-Type") or "").lower() if e.headers else "",
++                "head": body[:200].replace("\n", " "),
++                "url": url,
++                "error": str(e),
++            }
++            if status in (429, 500, 502, 503, 504):
++                _backoff(attempt)
++                continue
++            return None, last_err
++        except (urllib.error.URLError, TimeoutError, OSError) as e:
              last_err = {
                  "kind": "request_exception",
                  "url": url,
@@ -194,7 +221,6 @@ index fb65a9fffd4fd32ecc71990e346d47a4885b6360..f7905e1ef0898d5d21580c8b3c2bce68
 -def lawgo_search(query: str, knd: int = 3, display: int = 20) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
 +def lawgo_search(
 +    query: str,
-+    session: requests.Session,
 +    knd: int = 3,
 +    display: int = 20,
 +) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
@@ -210,14 +236,12 @@ index fb65a9fffd4fd32ecc71990e346d47a4885b6360..f7905e1ef0898d5d21580c8b3c2bce68
 -print("STATUS", r.status_code)
 -print("CT", r.headers.get("Content-Type"))
 -print("HEAD", (r.text or "")[:200].replace("\n", " "))
--    return _request_json(LAW_SEARCH, params)
-+    return _request_json(LAW_SEARCH, params, session)
-+
+     return _request_json(LAW_SEARCH, params)
  
 -def lawgo_detail(admrul_id: str) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
++
 +def lawgo_detail(
 +    admrul_id: str,
-+    session: requests.Session,
 +) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
      params = {
          "OC": LAWGO_OC,
@@ -225,8 +249,7 @@ index fb65a9fffd4fd32ecc71990e346d47a4885b6360..f7905e1ef0898d5d21580c8b3c2bce68
          "type": "JSON",
          "ID": str(admrul_id),
      }
--    return _request_json(LAW_SERVICE, params)
-+    return _request_json(LAW_SERVICE, params, session)
+     return _request_json(LAW_SERVICE, params)
  
  
  # =====================
@@ -294,6 +317,10 @@ index fb65a9fffd4fd32ecc71990e346d47a4885b6360..f7905e1ef0898d5d21580c8b3c2bce68
      return detail_json
  
  
++def admrul_id_encoded(adm_id: Any) -> str:
++    return urllib.parse.quote(str(adm_id))
++
++
  # =====================
  # Snapshot builder
  # =====================
@@ -301,7 +328,6 @@ index fb65a9fffd4fd32ecc71990e346d47a4885b6360..f7905e1ef0898d5d21580c8b3c2bce68
 +def build_snapshot_entry(
 +    std_item: Dict[str, Any],
 +    prev_entry: Dict[str, Any],
-+    session: requests.Session,
 +) -> Dict[str, Any]:
      query = std_item.get("query") or std_item.get("title") or std_item.get("code")
      knd = int(std_item.get("knd", 3))
@@ -310,7 +336,7 @@ index fb65a9fffd4fd32ecc71990e346d47a4885b6360..f7905e1ef0898d5d21580c8b3c2bce68
      # 1) search
 -    sj, err = lawgo_search(query, knd=knd)
 -    if err:
-+    search_json, search_err = lawgo_search(query=query, session=session, knd=knd)
++    search_json, search_err = lawgo_search(query=query, knd=knd)
 +    if search_err:
          return {
              **(prev_entry or {}),
@@ -350,7 +376,7 @@ index fb65a9fffd4fd32ecc71990e346d47a4885b6360..f7905e1ef0898d5d21580c8b3c2bce68
      # 2) detail
 -    dj, derr = lawgo_detail(str(adm_id))
 -    if derr:
-+    detail_json, detail_err = lawgo_detail(str(adm_id), session=session)
++    detail_json, detail_err = lawgo_detail(str(adm_id))
 +    if detail_err:
          return {
              **(prev_entry or {}),
@@ -405,10 +431,6 @@ index fb65a9fffd4fd32ecc71990e346d47a4885b6360..f7905e1ef0898d5d21580c8b3c2bce68
  
 -def detect_change(prev: Dict[str, Any], cur: Dict[str, Any]) -> Tuple[bool, list]:
 +
-+def admrul_id_encoded(adm_id: Any) -> str:
-+    return urllib.parse.quote(str(adm_id))
-+
-+
 +def detect_change(prev: Dict[str, Any], cur: Dict[str, Any]) -> Tuple[bool, List[str]]:
      if not prev:
          return False, []
@@ -441,24 +463,19 @@ index fb65a9fffd4fd32ecc71990e346d47a4885b6360..f7905e1ef0898d5d21580c8b3c2bce68
 +    changes: List[Dict[str, Any]] = []
 +    errors: List[Dict[str, Any]] = []
  
--    for tab_key, std in (("nfpc", nfpc), ("nftc", nftc)):
--        for item in std.get("items", []):
--            code = item.get("code")
--            if not code:
--                continue
-+    with requests.Session() as session:
-+        for tab_key, std in (("nfpc", nfpc), ("nftc", nftc)):
-+            for item in std.get("items", []):
-+                code = item.get("code")
-+                if not code:
-+                    continue
+     for tab_key, std in (("nfpc", nfpc), ("nftc", nftc)):
+         for item in std.get("items", []):
+             code = item.get("code")
+             if not code:
+                 continue
  
--            prev = (snap.get(tab_key, {}) or {}).get(code, {})
+             prev = (snap.get(tab_key, {}) or {}).get(code, {})
 -            cur = build_snapshot_entry(item, tab_key, prev)
--            snap.setdefault(tab_key, {})[code] = cur
--
++            cur = build_snapshot_entry(item, prev)
+             snap.setdefault(tab_key, {})[code] = cur
+ 
 -            # 에러 누적
--            if cur.get("error"):
+             if cur.get("error"):
 -                errors.append({
 -                    "code": code,
 -                    "title": item.get("title"),
@@ -469,9 +486,21 @@ index fb65a9fffd4fd32ecc71990e346d47a4885b6360..f7905e1ef0898d5d21580c8b3c2bce68
 -                    "head": cur["error"].get("head"),
 -                    "url": cur["error"].get("url"),
 -                })
--
--            changed, diff_keys = detect_change(prev, cur)
--            if changed and not cur.get("error"):
++                errors.append(
++                    {
++                        "code": code,
++                        "title": item.get("title"),
++                        "where": cur["error"].get("where"),
++                        "kind": cur["error"].get("kind"),
++                        "status": cur["error"].get("status"),
++                        "contentType": cur["error"].get("contentType"),
++                        "head": cur["error"].get("head"),
++                        "url": cur["error"].get("url"),
++                    }
++                )
+ 
+             changed, diff_keys = detect_change(prev, cur)
+             if changed and not cur.get("error"):
 -                changes.append({
 -                    "code": code,
 -                    "title": item.get("title"),
@@ -488,44 +517,24 @@ index fb65a9fffd4fd32ecc71990e346d47a4885b6360..f7905e1ef0898d5d21580c8b3c2bce68
 -                    ],
 -                    "refs": [{"label": "법제처(원문/DRF)", "url": cur.get("htmlUrl", "")}],
 -                })
-+                prev = (snap.get(tab_key, {}) or {}).get(code, {})
-+                cur = build_snapshot_entry(item, prev, session)
-+                snap.setdefault(tab_key, {})[code] = cur
-+
-+                if cur.get("error"):
-+                    errors.append(
-+                        {
-+                            "code": code,
-+                            "title": item.get("title"),
-+                            "where": cur["error"].get("where"),
-+                            "kind": cur["error"].get("kind"),
-+                            "status": cur["error"].get("status"),
-+                            "contentType": cur["error"].get("contentType"),
-+                            "head": cur["error"].get("head"),
-+                            "url": cur["error"].get("url"),
-+                        }
-+                    )
-+
-+                changed, diff_keys = detect_change(prev, cur)
-+                if changed and not cur.get("error"):
-+                    changes.append(
-+                        {
-+                            "code": code,
-+                            "title": item.get("title"),
-+                            "noticeNo": cur.get("noticeNo"),
-+                            "announceDate": cur.get("announceDate"),
-+                            "effectiveDate": cur.get("effectiveDate"),
-+                            "reason": f"자동 감지: 메타/본문 해시 변경({', '.join(diff_keys)})",
-+                            "diff": [],
-+                            "supplementary": "부칙/경과규정은 원문 확인",
-+                            "impact": [
-+                                "설계: 시행일 기준 적용(도서·시방서에 적용기준 명시)",
-+                                "시공: 자재/설비 선정 시 개정기준 충족 여부 확인",
-+                                "유지관리: 점검대장에 적용기준/이력 기록",
-+                            ],
-+                            "refs": [{"label": "법제처(원문/DRF)", "url": cur.get("htmlUrl", "")}],
-+                        }
-+                    )
++                changes.append(
++                    {
++                        "code": code,
++                        "title": item.get("title"),
++                        "noticeNo": cur.get("noticeNo"),
++                        "announceDate": cur.get("announceDate"),
++                        "effectiveDate": cur.get("effectiveDate"),
++                        "reason": f"자동 감지: 메타/본문 해시 변경({', '.join(diff_keys)})",
++                        "diff": [],
++                        "supplementary": "부칙/경과규정은 원문 확인",
++                        "impact": [
++                            "설계: 시행일 기준 적용(도서·시방서에 적용기준 명시)",
++                            "시공: 자재/설비 선정 시 개정기준 충족 여부 확인",
++                            "유지관리: 점검대장에 적용기준/이력 기록",
++                        ],
++                        "refs": [{"label": "법제처(원문/DRF)", "url": cur.get("htmlUrl", "")}],
++                    }
++                )
  
      data["lastRun"] = TODAY
  
