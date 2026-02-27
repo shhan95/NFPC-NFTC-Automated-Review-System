@@ -1,9 +1,9 @@
  (cd "$(git rev-parse --show-toplevel)" && git apply --3way <<'EOF' 
 diff --git a/scripts/check_updates.py b/scripts/check_updates.py
-index fb65a9fffd4fd32ecc71990e346d47a4885b6360..dfd97f81ffe3c5f894adab9c61617bc3c4e7d5c3 100644
+index fb65a9fffd4fd32ecc71990e346d47a4885b6360..b190677542646867bb80e8edf4627cf1573e2d9d 100644
 --- a/scripts/check_updates.py
 +++ b/scripts/check_updates.py
-@@ -1,384 +1,461 @@
+@@ -1,384 +1,422 @@
 -import os, json, hashlib, urllib.parse, time, random
 -from datetime import datetime, timezone, timedelta
 -from typing import Any, Dict, Tuple, Optional
@@ -14,9 +14,9 @@ index fb65a9fffd4fd32ecc71990e346d47a4885b6360..dfd97f81ffe3c5f894adab9c61617bc3
 +import os
 +import random
 +import time
++import urllib.error
 +import urllib.parse
 +import urllib.request
-+import urllib.error
 +from datetime import datetime, timedelta, timezone
 +from typing import Any, Dict, List, Optional, Tuple
  
@@ -38,8 +38,10 @@ index fb65a9fffd4fd32ecc71990e346d47a4885b6360..dfd97f81ffe3c5f894adab9c61617bc3
  LAW_SEARCH = "https://www.law.go.kr/DRF/lawSearch.do"
  LAW_SERVICE = "https://www.law.go.kr/DRF/lawService.do"
  
- TIMEOUT = 30
- MAX_RETRIES = 4
+-TIMEOUT = 30
+-MAX_RETRIES = 4
++TIMEOUT = int(os.getenv("LAWGO_TIMEOUT", "15"))
++MAX_RETRIES = int(os.getenv("LAWGO_MAX_RETRIES", "3"))
  
  
  # =====================
@@ -66,26 +68,28 @@ index fb65a9fffd4fd32ecc71990e346d47a4885b6360..dfd97f81ffe3c5f894adab9c61617bc3
          return s
      return f"{s[0:4]}.{s[4:6]}.{s[6:8]}"
  
+-def sha256_text(t: str) -> str:
+-    return hashlib.sha256((t or "").encode("utf-8")).hexdigest()
 +
- def sha256_text(t: str) -> str:
-     return hashlib.sha256((t or "").encode("utf-8")).hexdigest()
++def sha256_text(text: str) -> str:
++    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
  
  
  # =====================
  # HTTP (robust)
  # =====================
 +def _backoff(attempt: int) -> None:
-+    # 0.6s, 1.2s, 2.4s... + jitter
-+    base = 0.6 * (2 ** (attempt - 1))
++    # 0.5s, 1.0s, 2.0s ... + jitter
++    base = 0.5 * (2 ** (attempt - 1))
 +    time.sleep(base + random.random() * 0.4)
 +
 +
  def _request_json(url: str, params: Dict[str, str]) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
-     """
-     Returns: (json_payload, error_info)
-       - json_payload: parsed dict if success
-       - error_info: dict with debug fields if failed (no secret exposure)
-     """
+-    """
+-    Returns: (json_payload, error_info)
+-      - json_payload: parsed dict if success
+-      - error_info: dict with debug fields if failed (no secret exposure)
+-    """
 -    session = requests.Session()
 -    last_err = None
 +    last_err: Optional[Dict[str, Any]] = None
@@ -93,10 +97,12 @@ index fb65a9fffd4fd32ecc71990e346d47a4885b6360..dfd97f81ffe3c5f894adab9c61617bc3
 +        "Accept": "application/json,*/*;q=0.8",
 +        "User-Agent": "NFPC-NFTC-Automated-Review-System/1.0",
 +    }
++
++    query = urllib.parse.urlencode(params, doseq=False, safe="")
++    request_url = f"{url}?{query}"
  
      for attempt in range(1, MAX_RETRIES + 1):
-+        query = urllib.parse.urlencode(params, doseq=False, safe="")
-+        req = urllib.request.Request(f"{url}?{query}", headers=headers, method="GET")
++        req = urllib.request.Request(request_url, headers=headers, method="GET")
 +
          try:
 -            r = session.get(url, params=params, timeout=TIMEOUT, allow_redirects=True)
@@ -105,9 +111,8 @@ index fb65a9fffd4fd32ecc71990e346d47a4885b6360..dfd97f81ffe3c5f894adab9c61617bc3
 +            with urllib.request.urlopen(req, timeout=TIMEOUT) as response:
 +                status = getattr(response, "status", response.getcode())
 +                content_type = (response.headers.get("Content-Type") or "").lower()
-+                raw = response.read()
++                text = response.read().decode("utf-8", errors="replace")
 +
-+            text = raw.decode("utf-8", errors="replace")
              head = text[:200].replace("\n", " ")
  
 -            # status not ok
@@ -180,24 +185,25 @@ index fb65a9fffd4fd32ecc71990e346d47a4885b6360..dfd97f81ffe3c5f894adab9c61617bc3
 +            return payload, None
 +
 +        except urllib.error.HTTPError as e:
-+            status = e.code
 +            body = ""
 +            try:
 +                body = e.read().decode("utf-8", errors="replace")
 +            except Exception:
 +                body = ""
++
 +            last_err = {
 +                "kind": "http_error",
-+                "status": status,
++                "status": e.code,
 +                "contentType": (e.headers.get("Content-Type") or "").lower() if e.headers else "",
 +                "head": body[:200].replace("\n", " "),
 +                "url": url,
 +                "error": str(e),
 +            }
-+            if status in (429, 500, 502, 503, 504):
++            if e.code in (429, 500, 502, 503, 504):
 +                _backoff(attempt)
 +                continue
 +            return None, last_err
++
 +        except (urllib.error.URLError, TimeoutError, OSError) as e:
              last_err = {
                  "kind": "request_exception",
@@ -218,12 +224,7 @@ index fb65a9fffd4fd32ecc71990e346d47a4885b6360..dfd97f81ffe3c5f894adab9c61617bc3
  # =====================
  # Law.go API wrappers
  # =====================
--def lawgo_search(query: str, knd: int = 3, display: int = 20) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
-+def lawgo_search(
-+    query: str,
-+    knd: int = 3,
-+    display: int = 20,
-+) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+ def lawgo_search(query: str, knd: int = 3, display: int = 20) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
      params = {
          "OC": LAWGO_OC,
          "target": "admrul",
@@ -238,11 +239,8 @@ index fb65a9fffd4fd32ecc71990e346d47a4885b6360..dfd97f81ffe3c5f894adab9c61617bc3
 -print("HEAD", (r.text or "")[:200].replace("\n", " "))
      return _request_json(LAW_SEARCH, params)
  
--def lawgo_detail(admrul_id: str) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
 +
-+def lawgo_detail(
-+    admrul_id: str,
-+) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+ def lawgo_detail(admrul_id: str) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
      params = {
          "OC": LAWGO_OC,
          "target": "admrul",
@@ -253,7 +251,8 @@ index fb65a9fffd4fd32ecc71990e346d47a4885b6360..dfd97f81ffe3c5f894adab9c61617bc3
  
  
  # =====================
- # Picking / parsing
+-# Picking / parsing
++# Parsing / selection
  # =====================
 -def pick_best_item(items, org_name="소방청"):
 -    best = None
@@ -285,7 +284,6 @@ index fb65a9fffd4fd32ecc71990e346d47a4885b6360..dfd97f81ffe3c5f894adab9c61617bc3
 -        if k in search_json:
 -            return search_json.get(k) or []
 -    if "행정규칙" in search_json and isinstance(search_json["행정규칙"], list):
--        return search_json["행정규칙"]
 +
 +def _extract_items(search_json: Dict[str, Any]) -> List[Dict[str, Any]]:
 +    for key in ("admrul", "Admrul", "admruls"):
@@ -293,9 +291,8 @@ index fb65a9fffd4fd32ecc71990e346d47a4885b6360..dfd97f81ffe3c5f894adab9c61617bc3
 +        if isinstance(value, list):
 +            return value
 +
-+    kr_value = search_json.get("행정규칙")
-+    if isinstance(kr_value, list):
-+        return kr_value
++    if isinstance(search_json.get("행정규칙"), list):
+         return search_json["행정규칙"]
 +
      return []
  
@@ -306,34 +303,33 @@ index fb65a9fffd4fd32ecc71990e346d47a4885b6360..dfd97f81ffe3c5f894adab9c61617bc3
 -        return detail_json["행정규칙"]
 -    if isinstance(detail_json.get("admrul"), dict):
 -        return detail_json["admrul"]
-+    kr_payload = detail_json.get("행정규칙")
-+    if isinstance(kr_payload, dict):
-+        return kr_payload
-+
-+    en_payload = detail_json.get("admrul")
-+    if isinstance(en_payload, dict):
-+        return en_payload
-+
++    for key in ("행정규칙", "admrul"):
++        value = detail_json.get(key)
++        if isinstance(value, dict):
++            return value
      return detail_json
  
  
-+def admrul_id_encoded(adm_id: Any) -> str:
-+    return urllib.parse.quote(str(adm_id))
++def _admrul_html_url(adm_id: Any, best: Dict[str, Any]) -> str:
++    html_url = best.get("행정규칙상세링크") or best.get("상세링크") or ""
++    if html_url:
++        return str(html_url)
++
++    encoded_id = urllib.parse.quote(str(adm_id))
++    encoded_oc = urllib.parse.quote(LAWGO_OC)
++    return f"{LAW_SERVICE}?OC={encoded_oc}&target=admrul&ID={encoded_id}&type=HTML"
 +
 +
  # =====================
  # Snapshot builder
  # =====================
 -def build_snapshot_entry(std_item: Dict[str, Any], tab_key: str, prev_entry: Dict[str, Any]) -> Dict[str, Any]:
-+def build_snapshot_entry(
-+    std_item: Dict[str, Any],
-+    prev_entry: Dict[str, Any],
-+) -> Dict[str, Any]:
++def build_snapshot_entry(std_item: Dict[str, Any], prev_entry: Dict[str, Any]) -> Dict[str, Any]:
      query = std_item.get("query") or std_item.get("title") or std_item.get("code")
      knd = int(std_item.get("knd", 3))
      org_name = std_item.get("orgName", "소방청")
  
-     # 1) search
+-    # 1) search
 -    sj, err = lawgo_search(query, knd=knd)
 -    if err:
 +    search_json, search_err = lawgo_search(query=query, knd=knd)
@@ -343,12 +339,12 @@ index fb65a9fffd4fd32ecc71990e346d47a4885b6360..dfd97f81ffe3c5f894adab9c61617bc3
              "code": std_item.get("code"),
              "title": std_item.get("title"),
              "checkedAt": TODAY,
-             "error": {
-                 "where": "search",
+-            "error": {
+-                "where": "search",
 -                **err,
-+                **search_err,
-                 "query": query,
-             },
+-                "query": query,
+-            },
++            "error": {"where": "search", **search_err, "query": query},
          }
  
 -    items = _extract_items(sj or {})
@@ -373,7 +369,7 @@ index fb65a9fffd4fd32ecc71990e346d47a4885b6360..dfd97f81ffe3c5f894adab9c61617bc3
              "error": {"where": "search", "kind": "id_missing", "query": query},
          }
  
-     # 2) detail
+-    # 2) detail
 -    dj, derr = lawgo_detail(str(adm_id))
 -    if derr:
 +    detail_json, detail_err = lawgo_detail(str(adm_id))
@@ -389,44 +385,45 @@ index fb65a9fffd4fd32ecc71990e346d47a4885b6360..dfd97f81ffe3c5f894adab9c61617bc3
          }
  
 -    payload = _extract_payload(dj or {})
-+    payload = _extract_payload(detail_json or {})
- 
-     notice_no = payload.get("발령번호")
-     announce = ymd_int_to_dot(payload.get("발령일자"))
-     effective = ymd_int_to_dot(payload.get("시행일자"))
+-
+-    notice_no = payload.get("발령번호")
+-    announce = ymd_int_to_dot(payload.get("발령일자"))
+-    effective = ymd_int_to_dot(payload.get("시행일자"))
 -    rev = payload.get("제개정구분명")
-+    revision_type = payload.get("제개정구분명")
-     org = payload.get("소관부처명")
-     name = payload.get("행정규칙명") or std_item.get("title")
- 
-     body_hash = sha256_text(payload.get("조문내용") or "")
+-    org = payload.get("소관부처명")
+-    name = payload.get("행정규칙명") or std_item.get("title")
+-
+-    body_hash = sha256_text(payload.get("조문내용") or "")
 -    add_hash = sha256_text((payload.get("부칙내용") or "") + (payload.get("별표내용") or ""))
-+    supp_hash = sha256_text((payload.get("부칙내용") or "") + (payload.get("별표내용") or ""))
- 
-     html_url = best.get("행정규칙상세링크") or best.get("상세링크") or ""
-     if not html_url:
+-
+-    html_url = best.get("행정규칙상세링크") or best.get("상세링크") or ""
+-    if not html_url:
 -        html_url = f"{LAW_SERVICE}?OC={urllib.parse.quote(LAWGO_OC)}&target=admrul&ID={adm_id}&type=HTML"
-+        html_url = (
-+            f"{LAW_SERVICE}?OC={urllib.parse.quote(LAWGO_OC)}"
-+            f"&target=admrul&ID={admrul_id_encoded(adm_id)}&type=HTML"
-+        )
++    payload = _extract_payload(detail_json or {})
  
      return {
          "code": std_item.get("code"),
          "title": std_item.get("title"),
          "checkedAt": TODAY,
          "lawgoId": str(adm_id),
-         "noticeNo": notice_no,
-         "announceDate": announce,
-         "effectiveDate": effective,
+-        "noticeNo": notice_no,
+-        "announceDate": announce,
+-        "effectiveDate": effective,
 -        "revisionType": rev,
-+        "revisionType": revision_type,
-         "orgName": org,
-         "ruleName": name,
-         "htmlUrl": html_url,
-         "bodyHash": body_hash,
+-        "orgName": org,
+-        "ruleName": name,
+-        "htmlUrl": html_url,
+-        "bodyHash": body_hash,
 -        "suppHash": add_hash,
-+        "suppHash": supp_hash,
++        "noticeNo": payload.get("발령번호"),
++        "announceDate": ymd_int_to_dot(payload.get("발령일자")),
++        "effectiveDate": ymd_int_to_dot(payload.get("시행일자")),
++        "revisionType": payload.get("제개정구분명"),
++        "orgName": payload.get("소관부처명"),
++        "ruleName": payload.get("행정규칙명") or std_item.get("title"),
++        "htmlUrl": _admrul_html_url(adm_id, best),
++        "bodyHash": sha256_text(payload.get("조문내용") or ""),
++        "suppHash": sha256_text((payload.get("부칙내용") or "") + (payload.get("별표내용") or "")),
      }
  
 -def detect_change(prev: Dict[str, Any], cur: Dict[str, Any]) -> Tuple[bool, list]:
@@ -436,7 +433,7 @@ index fb65a9fffd4fd32ecc71990e346d47a4885b6360..dfd97f81ffe3c5f894adab9c61617bc3
          return False, []
 +
      if prev.get("error") or cur.get("error"):
-         # 에러 상태 변화도 기록 가치가 있음
+-        # 에러 상태 변화도 기록 가치가 있음
          if (prev.get("error") or "") != (cur.get("error") or ""):
              return True, ["error"]
          return False, []
@@ -538,12 +535,14 @@ index fb65a9fffd4fd32ecc71990e346d47a4885b6360..dfd97f81ffe3c5f894adab9c61617bc3
  
      data["lastRun"] = TODAY
  
-     if changes:
-         result = "변경 있음"
-         summary = f"자동 감지: {len(changes)}건 변경(원문 확인 권장)"
-     else:
-         result = "변경 없음"
-         summary = "전일 대비 변경 감지 없음"
+-    if changes:
+-        result = "변경 있음"
+-        summary = f"자동 감지: {len(changes)}건 변경(원문 확인 권장)"
+-    else:
+-        result = "변경 없음"
+-        summary = "전일 대비 변경 감지 없음"
++    result = "변경 있음" if changes else "변경 없음"
++    summary = f"자동 감지: {len(changes)}건 변경(원문 확인 권장)" if changes else "전일 대비 변경 감지 없음"
  
 -    # 에러가 있어도 워크플로는 “성공”으로 두고, 기록만 남김
      rec = {
