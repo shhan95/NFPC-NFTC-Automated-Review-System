@@ -5,57 +5,67 @@ on:
     - cron: "0 22 * * *" # KST 07:00 (UTC 22:00)
   workflow_dispatch:
 
-permissions:
-  contents: write
-
-concurrency:
-  group: nfpc-nftc-daily
-  cancel-in-progress: false
-
-jobs:
-  run-check:
-    runs-on: ubuntu-latest
-    env:
-      LAWGO_OC: ${{ secrets.LAWGO_OC }}
-      TZ: Asia/Seoul
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install deps
-        run: |
-          python -m pip install --upgrade pip
-          pip install requests
-
-      - name: Sanity check secret (no reveal)
-        shell: bash
-        run: |
-          if [ -z "$LAWGO_OC" ]; then
-            echo "ERROR: LAWGO_OC secret is empty. Add repository secret: LAWGO_OC"
-            exit 1
-          fi
-          echo "LAWGO_OC is set (length=${#LAWGO_OC})"
-
-      - name: Run checker
-        run: |
-          python scripts/check_updates.py
-
-      - name: Commit & push (only if changed)
-        shell: bash
-        run: |
-          git config user.name "nfpc-nftc-bot"
-          git config user.email "bot@users.noreply.github.com"
-
-          # 변경 여부 확인 (data.json/snapshot.json만)
-          if git status --porcelain | grep -E 'data\.json|snapshot\.json' >/dev/null 2>&1; then
-            git add data.json snapshot.json
-            git commit -m "Daily NFPC/NFTC check" || true
-            git push
-          else
-            echo "No changes to commit."
-          fi
+ (cd "$(git rev-parse --show-toplevel)" && git apply --3way <<'EOF' 
+diff --git a/.github/workflows/daily_check.yml b/.github/workflows/daily_check.yml
+index 06e90beb851e4079b9c8beb1100e5622740f6647..249996253200ef8d7450c9adc0983f58dd8d6a94 100644
+--- a/.github/workflows/daily_check.yml
++++ b/.github/workflows/daily_check.yml
+@@ -8,51 +8,54 @@ on:
+ permissions:
+   contents: write
+ 
+ concurrency:
+   group: nfpc-nftc-daily
+   cancel-in-progress: false
+ 
+ jobs:
+   run-check:
+     runs-on: ubuntu-latest
+     env:
+       LAWGO_OC: ${{ secrets.LAWGO_OC }}
+       TZ: Asia/Seoul
+ 
+     steps:
+       - uses: actions/checkout@v4
+ 
+       - name: Setup Python
+         uses: actions/setup-python@v5
+         with:
+           python-version: "3.11"
+ 
+       - name: Install deps
+         run: |
+           python -m pip install --upgrade pip
+-          pip install requests
++
++      - name: Validate script syntax
++        run: |
++          python -m py_compile scripts/check_updates.py
+ 
+       - name: Sanity check secret (no reveal)
+         shell: bash
+         run: |
+           if [ -z "$LAWGO_OC" ]; then
+             echo "ERROR: LAWGO_OC secret is empty. Add repository secret: LAWGO_OC"
+             exit 1
+           fi
+           echo "LAWGO_OC is set (length=${#LAWGO_OC})"
+ 
+       - name: Run checker
+         run: |
+           python scripts/check_updates.py
+ 
+       - name: Commit & push (only if changed)
+         shell: bash
+         run: |
+           git config user.name "nfpc-nftc-bot"
+           git config user.email "bot@users.noreply.github.com"
+ 
+           # 변경 여부 확인 (data.json/snapshot.json만)
+           if git status --porcelain | grep -E 'data\.json|snapshot\.json' >/dev/null 2>&1; then
+             git add data.json snapshot.json
+             git commit -m "Daily NFPC/NFTC check" || true
+             git push
+ 
+EOF
+)
